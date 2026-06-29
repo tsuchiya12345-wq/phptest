@@ -41,7 +41,7 @@ $isConnected = $dbStatus === 'connected';
             <?php endif; ?>
         </div>
     </div>
-
+    <h1>10:36テスト</h1>
     <script src="/assets/js/app.js"></script>
 </body>
 </html>
