@@ -1,0 +1,16 @@
+FROM php:8.2-apache
+
+# 必要なPHP拡張をインストール
+RUN docker-php-ext-install pdo pdo_mysql \
+    && a2enmod rewrite
+
+# カスタムPHP設定を配置
+COPY docker/php/php.ini /usr/local/etc/php/conf.d/custom.ini
+
+# DocumentRoot を public/ に変更するApache設定を配置
+COPY docker/apache/000-default.conf /etc/apache2/sites-available/000-default.conf
+
+WORKDIR /var/www/html
+
+# 変更の少ないアプリ本体を焼き込む
+COPY src /var/www/html/src

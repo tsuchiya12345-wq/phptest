@@ -1,0 +1,64 @@
+name: Build and Deploy
+
+# main への push 時に、アプリイメージ(Dockerfile)をビルドして ECR に push し、
+# ECS サービスへデプロイする。ベースイメージは ECR 上の phptest-base を FROM する。
+on:
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push app image
+        id: build
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          ECR_BASE_REPO: ${{ vars.ECR_BASE_REPO }}
+          ECR_APP_REPO: ${{ vars.ECR_APP_REPO }}
+        run: |
+          # Dockerfile の ARG BASE_IMAGE に ECR 上のベースイメージ URI を渡す
+          # (ローカル既定の phptest-base:latest を上書き)。
+          docker build \
+            -f docker/php/Dockerfile \
+            --build-arg "BASE_IMAGE=$ECR_REGISTRY/$ECR_BASE_REPO:latest" \
+            -t "$ECR_REGISTRY/$ECR_APP_REPO:${GITHUB_SHA}" \
+            -t "$ECR_REGISTRY/$ECR_APP_REPO:latest" \
+            .
+          docker push "$ECR_REGISTRY/$ECR_APP_REPO:${GITHUB_SHA}"
+          docker push "$ECR_REGISTRY/$ECR_APP_REPO:latest"
+          # デプロイは不変性のため SHA タグ基準で行う
+          echo "image=$ECR_REGISTRY/$ECR_APP_REPO:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Render new image into task definition
+        id: render
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: .aws/task-definition.json
+          container-name: ${{ vars.CONTAINER_NAME }}
+          image: ${{ steps.build.outputs.image }}
+
+      - name: Deploy to Amazon ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          service: ${{ vars.ECS_SERVICE }}
+          cluster: ${{ vars.ECS_CLUSTER }}
+          wait-for-service-stability: true

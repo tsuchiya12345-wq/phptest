@@ -1,0 +1,14 @@
+# 静的ファイルが存在しないリクエストを index.php に集約する場合は以下を有効化
+# （フロントコントローラ方式にする際に利用）
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+
+    # 実在するファイル/ディレクトリはそのまま配信
+    RewriteCond %{REQUEST_FILENAME} -f [OR]
+    RewriteCond %{REQUEST_FILENAME} -d
+    RewriteRule ^ - [L]
+
+    # それ以外は index.php へ
+    RewriteRule ^ index.php [L]
+</IfModule>

@@ -1,0 +1,8 @@
+.git
+.env
+*.log
+.DS_Store
+.idea/
+.vscode/
+db/
+README.md
