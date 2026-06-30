@@ -27,12 +27,18 @@ output "aws_account_id" {
 output "github_variables" {
   description = "GitHub の Repository variables に設定する値"
   value = {
-    AWS_REGION      = var.aws_region
-    ECR_BASE_REPO   = aws_ecr_repository.base.name
-    ECR_APP_REPO    = aws_ecr_repository.app.name
-    ECS_CLUSTER     = aws_ecs_cluster.this.name
-    ECS_SERVICE     = aws_ecs_service.this.name
-    ECS_TASK_FAMILY = aws_ecs_task_definition.this.family
-    CONTAINER_NAME  = var.container_name
+    AWS_REGION          = var.aws_region
+    ECR_BASE_REPO       = aws_ecr_repository.base.name
+    ECR_APP_REPO        = aws_ecr_repository.app.name
+    ECS_CLUSTER         = aws_ecs_cluster.this.name
+    ECS_SERVICE         = aws_ecs_service.this.name
+    ECS_STAGING_SERVICE = aws_ecs_service.this.name
+    ECS_PROD_SERVICE    = aws_ecs_service.prod.name
+    ECS_TASK_FAMILY     = aws_ecs_task_definition.this.family
+    CONTAINER_NAME      = var.container_name
+    SCHEDULER_ROLE_ARN  = aws_iam_role.scheduler.arn
+    EVENT_BUS_ARN       = aws_cloudwatch_event_bus.deploy.arn
+    EVENT_SOURCE        = local.event_source
+    EVENT_DETAIL_TYPE   = local.event_detail_type
   }
 }

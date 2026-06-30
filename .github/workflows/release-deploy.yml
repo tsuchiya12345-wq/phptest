@@ -1,0 +1,164 @@
+name: Release Deploy (Staging + Schedule Production)
+
+# release/<YYYYMMDDHHMM> への push 時に実行する。
+#   0. ブランチ名から本番反映日時(JST)を検証
+#   1. アプリイメージ(Dockerfile)をビルドして ECR に push
+#   2. ステージング用 ECS サービスへデプロイ
+#   3. 本番反映を EventBridge Scheduler のワンタイム予約として登録(日時はブランチ名から)
+# 本番デプロイ自体は別ワークフロー(production-deploy.yml)が
+# repository_dispatch(production-deploy) を受けて実行する。
+on:
+  push:
+    branches: ["release/**"]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  validate-schedule:
+    runs-on: ubuntu-latest
+    outputs:
+      at: ${{ steps.parse.outputs.at }}
+    steps:
+      - name: Parse production deploy datetime from branch name
+        id: parse
+        run: |
+          set -euo pipefail
+          # 規約: release/<YYYYMMDDHHMM> (例: release/202607010200 = 2026-07-01 02:00 JST)
+          DT="${GITHUB_REF_NAME#release/}"
+          if ! printf '%s' "$DT" | grep -Eq '^[0-9]{12}$'; then
+            echo "branch名が release/<YYYYMMDDHHMM> 形式ではありません: ${GITHUB_REF_NAME}" >&2
+            exit 1
+          fi
+          Y=${DT:0:4}; M=${DT:4:2}; D=${DT:6:2}; HH=${DT:8:2}; MM=${DT:10:2}
+          # 実在する日時か(JST)を検証
+          if ! TZ=Asia/Tokyo date -d "${Y}-${M}-${D} ${HH}:${MM}" >/dev/null 2>&1; then
+            echo "実在しない日時です: ${DT}" >&2
+            exit 1
+          fi
+          # 過去または現在以前でないか(JST同士の12桁比較=時系列比較)
+          NOW_JST="$(TZ=Asia/Tokyo date +%Y%m%d%H%M)"
+          if [ "$DT" -le "$NOW_JST" ]; then
+            echo "過去または現在以前の日時です: ${DT} (now JST=${NOW_JST})" >&2
+            exit 1
+          fi
+          AT="${Y}-${M}-${D}T${HH}:${MM}:00"
+          echo "Production deploy scheduled at ${AT} (Asia/Tokyo)"
+          echo "at=${AT}" >> "$GITHUB_OUTPUT"
+
+  build-and-push:
+    runs-on: ubuntu-latest
+    needs: validate-schedule
+    outputs:
+      image: ${{ steps.build.outputs.image }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push app image
+        id: build
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          ECR_BASE_REPO: ${{ vars.ECR_BASE_REPO }}
+          ECR_APP_REPO: ${{ vars.ECR_APP_REPO }}
+        run: |
+          # ベースイメージは ECR 上の phptest-base:latest を FROM する。
+          docker build \
+            -f docker/php/Dockerfile \
+            --build-arg "BASE_IMAGE=$ECR_REGISTRY/$ECR_BASE_REPO:latest" \
+            -t "$ECR_REGISTRY/$ECR_APP_REPO:${GITHUB_SHA}" \
+            -t "$ECR_REGISTRY/$ECR_APP_REPO:latest" \
+            .
+          docker push "$ECR_REGISTRY/$ECR_APP_REPO:${GITHUB_SHA}"
+          docker push "$ECR_REGISTRY/$ECR_APP_REPO:latest"
+          # 不変性のため SHA タグ基準のフル URI を後続ジョブへ渡す
+          echo "image=$ECR_REGISTRY/$ECR_APP_REPO:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+  deploy-staging:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Render new image into staging task definition
+        id: render
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: .aws/task-definition.json
+          container-name: ${{ vars.CONTAINER_NAME }}
+          image: ${{ needs.build-and-push.outputs.image }}
+
+      - name: Deploy to staging ECS service
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          service: ${{ vars.ECS_STAGING_SERVICE }}
+          cluster: ${{ vars.ECS_CLUSTER }}
+          wait-for-service-stability: true
+
+  create-schedule:
+    runs-on: ubuntu-latest
+    needs: [validate-schedule, build-and-push, deploy-staging]
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Create one-time EventBridge Scheduler for production deploy
+        env:
+          IMAGE: ${{ needs.build-and-push.outputs.image }}
+          AT: ${{ needs.validate-schedule.outputs.at }}
+          SCHEDULER_ROLE_ARN: ${{ vars.SCHEDULER_ROLE_ARN }}
+          EVENT_BUS_ARN: ${{ vars.EVENT_BUS_ARN }}
+          EVENT_SOURCE: ${{ vars.EVENT_SOURCE }}
+          EVENT_DETAIL_TYPE: ${{ vars.EVENT_DETAIL_TYPE }}
+        run: |
+          set -euo pipefail
+          # 反映日時はブランチ名(release/<YYYYMMDDHHMM>)から validate-schedule が算出済み。
+          # JST として解釈するため Scheduler の timezone に Asia/Tokyo を指定する。
+
+          # Scheduler は API Destination を直接呼べないため、
+          # PutEvents で custom bus にイベントを送る(後段のルールが GitHub /dispatches を叩く)。
+          # Input(detail) にステージング検証済みのフルイメージ URI を載せる。
+          cat > target.json <<EOF
+          {
+            "Arn": "${EVENT_BUS_ARN}",
+            "RoleArn": "${SCHEDULER_ROLE_ARN}",
+            "EventBridgeParameters": {
+              "DetailType": "${EVENT_DETAIL_TYPE}",
+              "Source": "${EVENT_SOURCE}"
+            },
+            "Input": "{\"image_tag\":\"${IMAGE}\"}"
+          }
+          EOF
+
+          aws scheduler create-schedule \
+            --name "prod-deploy-${GITHUB_SHA}" \
+            --description "One-time production deploy for ${IMAGE}" \
+            --schedule-expression "at(${AT})" \
+            --schedule-expression-timezone "Asia/Tokyo" \
+            --action-after-completion DELETE \
+            --flexible-time-window '{"Mode":"OFF"}' \
+            --target file://target.json
+
+          echo "Scheduled production deploy at ${AT} (Asia/Tokyo) for image ${IMAGE}"

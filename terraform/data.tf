@@ -21,4 +21,14 @@ locals {
   service_name   = "${var.project}-service"
   task_family    = "${var.project}-task"
   log_group_name = "/ecs/${var.project}-task"
+
+  # 本番(production)環境用のリソース名。既存の単一サービスはステージング扱い。
+  prod_service_name   = "${var.project}-prod-service"
+  prod_task_family    = "${var.project}-prod-task"
+  prod_log_group_name = "/ecs/${var.project}-prod-task"
+
+  # EventBridge Scheduler -> PutEvents -> ルール -> API Destination で使う識別子
+  event_bus_name    = "${var.project}-deploy-bus"
+  event_source      = "${var.project}.deploy"
+  event_detail_type = "production-deploy"
 }

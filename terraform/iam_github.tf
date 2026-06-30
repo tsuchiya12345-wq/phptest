@@ -69,21 +69,49 @@ data "aws_iam_policy_document" "github_permissions" {
     resources = ["*"]
   }
 
-  # 対象サービスの更新 / 参照
+  # 対象サービス(ステージング / 本番)の更新 / 参照
   statement {
     sid = "EcsDeploy"
     actions = [
       "ecs:UpdateService",
       "ecs:DescribeServices",
     ]
-    resources = [aws_ecs_service.this.id]
+    resources = [
+      aws_ecs_service.this.id,
+      aws_ecs_service.prod.id,
+    ]
   }
 
-  # RegisterTaskDefinition / 起動時に実行ロールを渡すため
+  # RegisterTaskDefinition / 起動時に ECS 実行ロールを渡すため
   statement {
     sid       = "PassExecutionRole"
     actions   = ["iam:PassRole"]
     resources = [aws_iam_role.ecs_execution.arn]
+  }
+
+  # release-deploy.yml が本番反映のワンタイム予約を作成 / 削除するため
+  statement {
+    sid = "SchedulerManage"
+    actions = [
+      "scheduler:CreateSchedule",
+      "scheduler:DeleteSchedule",
+      "scheduler:GetSchedule",
+    ]
+    resources = [
+      "arn:aws:scheduler:${var.aws_region}:${data.aws_caller_identity.current.account_id}:schedule/default/prod-deploy-*",
+    ]
+  }
+
+  # Scheduler の作成時に PutEvents 用ロールを渡すため
+  statement {
+    sid       = "PassSchedulerRole"
+    actions   = ["iam:PassRole"]
+    resources = [aws_iam_role.scheduler.arn]
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PassedToService"
+      values   = ["scheduler.amazonaws.com"]
+    }
   }
 }
 

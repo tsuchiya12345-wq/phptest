@@ -51,3 +51,15 @@ variable "bootstrap_image" {
   type        = string
   default     = "public.ecr.aws/docker/library/httpd:2.4"
 }
+
+variable "prod_listener_port" {
+  description = "本番サービスを公開する ALB リスナーのポート (ステージングは 80)"
+  type        = number
+  default     = 8080
+}
+
+variable "github_dispatch_token" {
+  description = "EventBridge から GitHub の repository_dispatch を叩くためのトークン (repo / contents 権限)。EventBridge Connection に保管される"
+  type        = string
+  sensitive   = true
+}

@@ -1,0 +1,58 @@
+name: Production Deploy
+
+# EventBridge Scheduler から GitHub の repository_dispatch(production-deploy) を
+# 受けて本番用 ECS サービスへデプロイする独立ワークフロー。
+# client_payload.image_tag には release-deploy.yml がステージングで検証した
+# フルイメージ URI が入る(同一イメージの不変デプロイ)。
+#
+# NOTE: repository_dispatch はデフォルトブランチ(main)上のワークフローしか
+#       起動しないため、このファイルは main に存在させる必要がある。
+#       また run の github.sha は main の HEAD になるため、デプロイ対象は
+#       github.sha ではなく client_payload.image_tag のみを使う。
+on:
+  repository_dispatch:
+    types: [production-deploy]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy-production:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate payload
+        env:
+          IMAGE: ${{ github.event.client_payload.image_tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "${IMAGE}" ]; then
+            echo "client_payload.image_tag is empty" >&2
+            exit 1
+          fi
+          echo "Deploying image: ${IMAGE}"
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Render image into production task definition
+        id: render
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: .aws/task-definition.prod.json
+          container-name: ${{ vars.CONTAINER_NAME }}
+          image: ${{ github.event.client_payload.image_tag }}
+
+      - name: Deploy to production ECS service
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          service: ${{ vars.ECS_PROD_SERVICE }}
+          cluster: ${{ vars.ECS_CLUSTER }}
+          wait-for-service-stability: true
